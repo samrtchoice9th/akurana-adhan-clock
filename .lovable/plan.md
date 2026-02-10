@@ -1,92 +1,149 @@
 
 
-# Akurana Prayer Time App — Implementation Plan
+# CSV Upload + Carry-Forward + Iqamath Offsets + Hijri Control
 
 ## Overview
-A two-page prayer time display app for Akurana, Sri Lanka mosque. Dark-themed, mobile-first, manually-driven data for the full year 2026. Powered by Supabase for data storage.
+
+Major architecture change: replace per-day manual entry with a CSV-based carry-forward system, rule-based Iqamath offset generation, and admin-controlled Hijri date management with moon sighting confirmation.
 
 ---
 
-## Page 1: Prayer Time Display (User Page)
+## 1. New Database Tables
 
-### Header Section
-- **Live clock** — large digital time display (updates every second)
-- **Gregorian date** — e.g. "Monday, February 9, 2026"
-- **Hijri date** — text from database, e.g. "Sha'bān 1447"
+### Table: `prayer_time_changes`
+Stores CSV change-point rows (NOT daily entries).
 
-### Next Prayer Highlight Box
-- Large highlighted card with yellow/green border showing:
-  - "Next" badge + prayer name + countdown ("in 2h 29m")
-  - Adhan time (large, green text)
-  - Iqamath time (large, yellow text)
+| Column | Type | Notes |
+|---|---|---|
+| id | uuid (PK) | auto-generated |
+| effective_from | date (unique) | when this change takes effect |
+| subah_adhan | text, nullable | empty = no change |
+| sunrise | text, nullable | |
+| luhar_adhan | text, nullable | |
+| asr_adhan | text, nullable | |
+| magrib_adhan | text, nullable | |
+| isha_adhan | text, nullable | |
+| created_at | timestamptz | auto |
 
-### Prayer List
-Six rows in fixed order: **Subah, Sunrise, Luhar, Asr, Magrib, Isha**
-- Each row shows: icon, prayer name, Adhan time (green), Iqamath time (yellow)
-- Sunrise shows only one time (no Iqamath)
-- The "next prayer" row gets a highlighted border/background
-- All times displayed as plain text from database
+RLS: Public read/insert/update/delete (same as current `prayer_times`).
 
-### Auto-Update Behavior
-- App checks system date on load and periodically
-- Fetches matching date record from Supabase
-- If no data found → displays "Prayer times not available for this date"
-- Next prayer detection compares current time against stored text times
+### Table: `hijri_date`
+Stores the current Hijri date state (single row, admin-controlled).
 
----
+| Column | Type | Notes |
+|---|---|---|
+| id | uuid (PK) | auto-generated |
+| hijri_year | integer | e.g. 1447 |
+| hijri_month | integer | 1-12 |
+| hijri_day | integer | 1-30 |
+| last_updated | date | Gregorian date of last change |
+| created_at | timestamptz | auto |
 
-## Page 2: Admin Data Entry
+RLS: Public read/update/insert.
 
-### Access
-- Simple password gate (hardcoded or stored in Supabase) — enter password to access admin panel
-
-### Entry Form
-- **Date picker** — select a specific date (YYYY-MM-DD format, 2026 only)
-- **Hijri date** — text input for the Islamic date
-- **Prayer time fields** — for each of the 6 prayers:
-  - Subah: Adhan + Iqamath
-  - Sunrise: Time only
-  - Luhar: Adhan + Iqamath
-  - Asr: Adhan + Iqamath
-  - Magrib: Adhan + Iqamath
-  - Isha: Adhan + Iqamath
-- All fields are **text inputs** (e.g. "5:10 AM")
-
-### Admin Controls
-- **Save** — inserts new date record or updates existing with confirmation
-- **Load existing** — selecting a date that already has data pre-fills the form for editing
-- **No delete** unless explicitly confirmed with a dialog
+The existing `prayer_times` table remains untouched (unused going forward).
 
 ---
 
-## Database (Supabase)
+## 2. Carry-Forward + Iqamath Offset Logic
 
-### Table: `prayer_times`
-| Column | Type |
+### New hook: `usePrayerTimes.ts` (rewrite)
+
+**Step 1 -- Build today's Adhan times:**
+1. Fetch all rows from `prayer_time_changes` where `effective_from <= today`
+2. Sort ascending by `effective_from`
+3. Merge: for each field, if value is non-null/non-empty, overwrite; otherwise keep previous
+4. Result = today's Adhan + Sunrise times
+
+**Step 2 -- Generate Iqamath via fixed offsets:**
+
+| Prayer | Rule |
 |---|---|
-| id | uuid (primary key) |
-| date | date (unique) |
-| hijri_date | text |
-| subah_adhan | text |
-| subah_iqamath | text |
-| sunrise | text |
-| luhar_adhan | text |
-| luhar_iqamath | text |
-| asr_adhan | text |
-| asr_iqamath | text |
-| magrib_adhan | text |
-| magrib_iqamath | text |
-| isha_adhan | text |
-| isha_iqamath | text |
+| Subah | Adhan + 30 min |
+| Luhar | Adhan + 15 min |
+| Asr | Adhan + 15 min |
+| Magrib | Adhan + 10 min |
+| Isha | Adhan + 15 min |
+
+- Parse Adhan time string, add minutes, format back to `HH:MM AM/PM`
+- If Adhan is missing, Iqamath is NOT shown
+- No rounding, no seasonal adjustment
+
+**Step 3 -- Fetch Hijri date:**
+- Read single row from `hijri_date` table
+- Format as "Day Month Year" for display (e.g. "15 Sha'ban 1447")
+- Hijri month names mapped client-side
+
+### New utility: `src/lib/iqamathOffset.ts`
+- `addMinutesToTime(timeStr: string, minutes: number): string`
+- Parses HH:MM AM/PM, adds offset, returns HH:MM AM/PM
 
 ---
 
-## Design
-- **Black background**, white text
-- **Green** for Adhan times and prayer names
-- **Yellow** for Iqamath times
-- **Green/yellow bordered card** for next prayer highlight
-- Large, readable fonts throughout
-- Mobile-first layout matching the uploaded reference image
-- Minimal animations (fade/highlight transitions only)
+## 3. Admin Page -- Complete Rewrite
+
+Two sections with tabs:
+
+### Tab 1: CSV Upload
+1. **File input** -- accepts `.csv` only
+2. **Strict validation** (client-side, in `src/lib/csvParser.ts`):
+   - Header must match exactly: `effective_from,subah_adhan,sunrise,luhar_adhan,asr_adhan,magrib_adhan,isha_adhan`
+   - `effective_from` must be valid YYYY-MM-DD
+   - First row must be `2026-01-01`
+   - Time values must match `HH:MM AM` or `HH:MM PM` or empty
+   - No duplicate `effective_from` dates
+   - Auto-sort by date ascending
+   - On failure: show clear error, reject entire file
+3. **Preview table** -- shows parsed rows with validation status
+4. **Confirm and Save** -- deletes all existing `prayer_time_changes` rows, inserts new CSV data
+5. **Current data view** -- shows existing records count
+
+### Tab 2: Hijri Control Panel
+1. **Current Hijri date display** -- shows year/month/day
+2. **Daily increment button** -- admin clicks to advance day by 1
+3. **Day 29 alert** -- when `hijri_day = 29`, show prominent alert:
+   - "Hijri month day 29 reached. Moon sighting not confirmed."
+   - Two buttons:
+     - "Moon Sighted" -- sets day to 1, increments month (and year if month was 12)
+     - "Moon Not Sighted" -- sets day to 30
+4. **Manual override** -- inputs for year/month/day with save button
+5. No auto-calculation, no internet moon data
+
+Password gate remains unchanged.
+
+---
+
+## 4. User Page Changes
+
+### `Index.tsx` updates:
+- Display Hijri date from `hijri_date` table (formatted as "Day MonthName Year")
+- Everything else stays the same -- `NextPrayerCard` and `PrayerRow` components unchanged
+
+### Hijri month name mapping (client-side constant):
+```text
+1: Muharram, 2: Safar, 3: Rabi ul-Awwal, 4: Rabi ul-Akhir,
+5: Jumada ul-Ula, 6: Jumada ul-Akhira, 7: Rajab, 8: Sha'ban,
+9: Ramadan, 10: Shawwal, 11: Dhul Qa'dah, 12: Dhul Hijjah
+```
+
+---
+
+## 5. Files Summary
+
+| File | Action |
+|---|---|
+| `supabase/migrations/new.sql` | Create `prayer_time_changes` + `hijri_date` tables with RLS |
+| `src/lib/csvParser.ts` | New: CSV parsing + strict validation |
+| `src/lib/iqamathOffset.ts` | New: time offset utility |
+| `src/hooks/usePrayerTimes.ts` | Rewrite: carry-forward merge + iqamath offsets |
+| `src/hooks/useHijriDate.ts` | New: fetch/update Hijri date from DB |
+| `src/pages/Admin.tsx` | Complete rewrite: CSV upload tab + Hijri control tab |
+| `src/pages/Index.tsx` | Minor: use Hijri hook for date display |
+| `.lovable/plan.md` | Update with new architecture |
+
+### Files NOT changed
+- `src/components/NextPrayerCard.tsx` -- no changes
+- `src/components/PrayerRow.tsx` -- no changes
+- `src/hooks/useClock.ts` -- no changes
+- `src/App.tsx` -- no changes
 
