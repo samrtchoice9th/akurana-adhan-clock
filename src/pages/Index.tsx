@@ -4,7 +4,7 @@ import { usePrayerTimes, getPrayerList, getNextPrayerIndex, getCountdown } from 
 import { useHijriDate, formatHijriDate } from '@/hooks/useHijriDate';
 import { NextPrayerCard } from '@/components/NextPrayerCard';
 import { PrayerRow } from '@/components/PrayerRow';
-import { Settings } from 'lucide-react';
+import { Settings as SettingsIcon } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 const Index = () => {
@@ -23,8 +23,8 @@ const Index = () => {
         <div className="flex items-center justify-between mb-4">
           <div className="w-8" />
           <h1 className="text-lg font-bold text-primary tracking-wide">AKURANA PRAYER TIME</h1>
-          <Link to="/admin" className="text-muted-foreground hover:text-foreground transition-colors">
-            <Settings className="h-5 w-5" />
+          <Link to="/settings" className="text-muted-foreground hover:text-foreground transition-colors">
+            <SettingsIcon className="h-5 w-5" />
           </Link>
         </div>
 
