@@ -1,149 +1,92 @@
 
 
-# CSV Upload + Carry-Forward + Iqamath Offsets + Hijri Control
+# Direct Excel Upload Support
 
-## Overview
+## Problem
+The current CSV parser expects a specific flat format, but your actual data is in an Excel file (.xlsx) with a completely different structure:
+- Organized by month (January, February, etc.)
+- January has daily entries; Feb-Dec use date ranges (e.g., "01-06", "07-12")
+- Times use hyphens in some months (e.g., "5-08") and colons in others (e.g., "5:08")
+- No AM/PM indicators in the file
 
-Major architecture change: replace per-day manual entry with a CSV-based carry-forward system, rule-based Iqamath offset generation, and admin-controlled Hijri date management with moon sighting confirmation.
-
----
-
-## 1. New Database Tables
-
-### Table: `prayer_time_changes`
-Stores CSV change-point rows (NOT daily entries).
-
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid (PK) | auto-generated |
-| effective_from | date (unique) | when this change takes effect |
-| subah_adhan | text, nullable | empty = no change |
-| sunrise | text, nullable | |
-| luhar_adhan | text, nullable | |
-| asr_adhan | text, nullable | |
-| magrib_adhan | text, nullable | |
-| isha_adhan | text, nullable | |
-| created_at | timestamptz | auto |
-
-RLS: Public read/insert/update/delete (same as current `prayer_times`).
-
-### Table: `hijri_date`
-Stores the current Hijri date state (single row, admin-controlled).
-
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid (PK) | auto-generated |
-| hijri_year | integer | e.g. 1447 |
-| hijri_month | integer | 1-12 |
-| hijri_day | integer | 1-30 |
-| last_updated | date | Gregorian date of last change |
-| created_at | timestamptz | auto |
-
-RLS: Public read/update/insert.
-
-The existing `prayer_times` table remains untouched (unused going forward).
+## Solution
+Replace the CSV upload system with an Excel (.xlsx) parser that understands your exact file format and converts it into carry-forward records for the database.
 
 ---
 
-## 2. Carry-Forward + Iqamath Offset Logic
+## How It Works
 
-### New hook: `usePrayerTimes.ts` (rewrite)
+1. Admin uploads the `.xlsx` file directly (no CSV conversion needed)
+2. The app parses each month's section automatically
+3. Date ranges like "01-06" become a single `effective_from` date (the range start, e.g., 2026-02-01)
+4. Times are converted from "5-08" or "5:08" to "5:08 AM" with AM/PM assigned by prayer type:
+   - Subah, Sunrise: Always AM
+   - Luhar: AM if hour is less than 12, PM if 12 or greater
+   - Asr, Magrib, Isha: Always PM
+5. Result is inserted into `prayer_time_changes` table as carry-forward records
 
-**Step 1 -- Build today's Adhan times:**
-1. Fetch all rows from `prayer_time_changes` where `effective_from <= today`
-2. Sort ascending by `effective_from`
-3. Merge: for each field, if value is non-null/non-empty, overwrite; otherwise keep previous
-4. Result = today's Adhan + Sunrise times
+## AM/PM Assignment Rules
 
-**Step 2 -- Generate Iqamath via fixed offsets:**
-
-| Prayer | Rule |
-|---|---|
-| Subah | Adhan + 30 min |
-| Luhar | Adhan + 15 min |
-| Asr | Adhan + 15 min |
-| Magrib | Adhan + 10 min |
-| Isha | Adhan + 15 min |
-
-- Parse Adhan time string, add minutes, format back to `HH:MM AM/PM`
-- If Adhan is missing, Iqamath is NOT shown
-- No rounding, no seasonal adjustment
-
-**Step 3 -- Fetch Hijri date:**
-- Read single row from `hijri_date` table
-- Format as "Day Month Year" for display (e.g. "15 Sha'ban 1447")
-- Hijri month names mapped client-side
-
-### New utility: `src/lib/iqamathOffset.ts`
-- `addMinutesToTime(timeStr: string, minutes: number): string`
-- Parses HH:MM AM/PM, adds offset, returns HH:MM AM/PM
-
----
-
-## 3. Admin Page -- Complete Rewrite
-
-Two sections with tabs:
-
-### Tab 1: CSV Upload
-1. **File input** -- accepts `.csv` only
-2. **Strict validation** (client-side, in `src/lib/csvParser.ts`):
-   - Header must match exactly: `effective_from,subah_adhan,sunrise,luhar_adhan,asr_adhan,magrib_adhan,isha_adhan`
-   - `effective_from` must be valid YYYY-MM-DD
-   - First row must be `2026-01-01`
-   - Time values must match `HH:MM AM` or `HH:MM PM` or empty
-   - No duplicate `effective_from` dates
-   - Auto-sort by date ascending
-   - On failure: show clear error, reject entire file
-3. **Preview table** -- shows parsed rows with validation status
-4. **Confirm and Save** -- deletes all existing `prayer_time_changes` rows, inserts new CSV data
-5. **Current data view** -- shows existing records count
-
-### Tab 2: Hijri Control Panel
-1. **Current Hijri date display** -- shows year/month/day
-2. **Daily increment button** -- admin clicks to advance day by 1
-3. **Day 29 alert** -- when `hijri_day = 29`, show prominent alert:
-   - "Hijri month day 29 reached. Moon sighting not confirmed."
-   - Two buttons:
-     - "Moon Sighted" -- sets day to 1, increments month (and year if month was 12)
-     - "Moon Not Sighted" -- sets day to 30
-4. **Manual override** -- inputs for year/month/day with save button
-5. No auto-calculation, no internet moon data
-
-Password gate remains unchanged.
-
----
-
-## 4. User Page Changes
-
-### `Index.tsx` updates:
-- Display Hijri date from `hijri_date` table (formatted as "Day MonthName Year")
-- Everything else stays the same -- `NextPrayerCard` and `PrayerRow` components unchanged
-
-### Hijri month name mapping (client-side constant):
 ```text
-1: Muharram, 2: Safar, 3: Rabi ul-Awwal, 4: Rabi ul-Akhir,
-5: Jumada ul-Ula, 6: Jumada ul-Akhira, 7: Rajab, 8: Sha'ban,
-9: Ramadan, 10: Shawwal, 11: Dhul Qa'dah, 12: Dhul Hijjah
+Prayer     | Rule
+-----------|------------------
+Subah      | Always AM
+Sunrise    | Always AM
+Luhar      | < 12 = AM, >= 12 = PM
+Asr        | Always PM
+Magrib     | Always PM
+Isha       | Always PM
 ```
 
+## Example Conversion
+
+Excel row: `01-06 | 5-08 | 6-27 | 12-23 | 3-45 | 6-17 | 7-29` (February)
+
+Becomes database record:
+- effective_from: 2026-02-01
+- subah_adhan: "5:08 AM"
+- sunrise: "6:27 AM"
+- luhar_adhan: "12:23 PM"
+- asr_adhan: "3:45 PM"
+- magrib_adhan: "6:17 PM"
+- isha_adhan: "7:29 PM"
+
 ---
 
-## 5. Files Summary
+## Technical Changes
 
-| File | Action |
+### 1. Install `xlsx` library
+Add the SheetJS library to parse Excel files in the browser.
+
+### 2. New file: `src/lib/excelParser.ts`
+Parses the uploaded .xlsx file:
+- Reads the first sheet
+- Detects month sections by scanning for month names (JANUARY, FEBRUARY, etc.)
+- For each month section, reads date ranges and time values
+- Handles both daily entries (January: "1", "2") and range entries (Feb-Dec: "01-06")
+- Converts hyphened times ("5-08") to colon format ("5:08")
+- Assigns AM/PM based on prayer column
+- Outputs an array of carry-forward records ready for database insertion
+
+### 3. Update `src/pages/Admin.tsx`
+- Change file input to accept `.xlsx` files instead of `.csv`
+- Replace CSV parser with the new Excel parser
+- Preview table and save flow remain the same
+- Keep all validation: show errors clearly, reject bad data
+
+### 4. Update `src/lib/csvParser.ts`
+Keep as backup but the primary upload path will use the Excel parser.
+
+### Files Modified
+| File | Change |
 |---|---|
-| `supabase/migrations/new.sql` | Create `prayer_time_changes` + `hijri_date` tables with RLS |
-| `src/lib/csvParser.ts` | New: CSV parsing + strict validation |
-| `src/lib/iqamathOffset.ts` | New: time offset utility |
-| `src/hooks/usePrayerTimes.ts` | Rewrite: carry-forward merge + iqamath offsets |
-| `src/hooks/useHijriDate.ts` | New: fetch/update Hijri date from DB |
-| `src/pages/Admin.tsx` | Complete rewrite: CSV upload tab + Hijri control tab |
-| `src/pages/Index.tsx` | Minor: use Hijri hook for date display |
-| `.lovable/plan.md` | Update with new architecture |
+| `package.json` | Add `xlsx` dependency |
+| `src/lib/excelParser.ts` | New: Excel parsing + time conversion |
+| `src/pages/Admin.tsx` | Update to use Excel parser, accept .xlsx |
 
-### Files NOT changed
-- `src/components/NextPrayerCard.tsx` -- no changes
-- `src/components/PrayerRow.tsx` -- no changes
-- `src/hooks/useClock.ts` -- no changes
-- `src/App.tsx` -- no changes
+### Files NOT Changed
+- `src/hooks/usePrayerTimes.ts` -- carry-forward logic stays identical
+- `src/pages/Index.tsx` -- no changes
+- `src/components/*` -- no changes
+- Database schema -- no changes (same `prayer_time_changes` table)
 
