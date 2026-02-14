@@ -112,3 +112,16 @@ The scheduled function runs every minute and sends reminders based on:
 - `daily_prayer_times`
 - `users_push_tokens`
 - `notification_sent_log` (dedupe)
+
+### Admin password security
+
+Do not hardcode plaintext admin passwords in source.
+Set a SHA-256 hash in environment variable:
+
+- `VITE_ADMIN_PASSWORD_HASH`
+
+Generate hash example:
+
+```sh
+node -e "const c=require('crypto');console.log(c.createHash('sha256').update('your-password').digest('hex'))"
+```
