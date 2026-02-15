@@ -45,6 +45,27 @@ function normalizeToHHMM(timeValue) {
   return `${normalizedHour}:${normalizedMinute}`;
 }
 
+
+  const parts = formatter.formatToParts(date);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return {
+    date: `${map.year}-${map.month}-${map.day}`,
+    hhmm: `${map.hour}:${map.minute}`,
+  };
+}
+
+function normalizeToHHMM(timeValue) {
+  if (!timeValue || typeof timeValue !== 'string') return null;
+
+  const match = timeValue.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+
+  const normalizedHour = String(Number(match[1])).padStart(2, '0');
+  const normalizedMinute = match[2];
+  return `${normalizedHour}:${normalizedMinute}`;
+}
+
 function addMinutesToHHMM(hhmmValue, minutesToAdd) {
   const [hour, minute] = hhmmValue.split(':').map(Number);
   const totalMinutes = hour * 60 + minute + minutesToAdd;
