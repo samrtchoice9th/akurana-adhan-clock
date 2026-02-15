@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { getToken, onMessage } from 'firebase/messaging';
 import { supabase } from '@/integrations/supabase/client';
 import { getFirebaseMessaging } from '@/lib/firebase';
@@ -67,8 +67,6 @@ export function useNotifications(location: string, autoPrompt = false) {
   const [token, setToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const reminderTypes = useMemo(() => getReminderTypes(prefs), [prefs]);
-
   const syncToken = useCallback(async (nextEnabled: boolean, nextPrefs: NotificationPrefs, nextToken?: string | null) => {
     const activeToken = nextToken ?? token;
     if (!activeToken) return;
@@ -119,6 +117,60 @@ export function useNotifications(location: string, autoPrompt = false) {
     }
   }, [prefs, syncToken]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadExistingState() {
+      if (typeof Notification === 'undefined' || !('serviceWorker' in navigator)) return;
+      if (Notification.permission !== 'granted') return;
+
+      try {
+        const swReg = await navigator.serviceWorker.register(getMessagingServiceWorkerUrl());
+        const messaging = await getFirebaseMessaging();
+        if (!messaging) return;
+
+        const vapidKey = import.meta.env.VITE_FIREBASE_VAPID_KEY;
+        const fcmToken = await getToken(messaging, { vapidKey, serviceWorkerRegistration: swReg });
+        if (!fcmToken || cancelled) return;
+
+        setToken(fcmToken);
+
+        const deviceId = getOrCreateDeviceId();
+        const { data, error } = await supabase
+          .from('users_push_tokens')
+          .select('reminder_type')
+          .eq('device_id', deviceId)
+          .eq('notifications_enabled', true);
+
+        if (error || cancelled) return;
+
+        if (!data || data.length === 0) {
+          setEnabled(false);
+          setPrefs(defaultPrefs);
+          return;
+        }
+
+        const nextPrefs: NotificationPrefs = {
+          min10: data.some((row) => row.reminder_type === '10min'),
+          min5: data.some((row) => row.reminder_type === '5min'),
+          adhan: data.some((row) => row.reminder_type === 'adhan'),
+          iqamah: data.some((row) => row.reminder_type === 'iqamah'),
+        };
+
+        setEnabled(true);
+        setPrefs(nextPrefs);
+      } catch {
+        // Ignore initialization failures and allow manual enable flow.
+      }
+    }
+
+    void loadExistingState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const disablePush = useCallback(async () => {
     setEnabled(false);
     await syncToken(false, prefs);
@@ -132,15 +184,9 @@ export function useNotifications(location: string, autoPrompt = false) {
     await registerPush();
   }, [disablePush, enabled, registerPush]);
 
-  const setPreference = useCallback(async (key: keyof NotificationPrefs, value: boolean) => {
-    setPrefs((prev) => {
-      const next = { ...prev, [key]: value };
-      if (enabled) {
-        void syncToken(true, next);
-      }
-      return next;
-    });
-  }, [enabled, syncToken]);
+  const setPreference = useCallback((key: keyof NotificationPrefs, value: boolean) => {
+    setPrefs((prev) => ({ ...prev, [key]: value }));
+  }, []);
 
   useEffect(() => {
     if (!autoPrompt || typeof window === 'undefined' || permission === 'granted') return;
@@ -163,6 +209,11 @@ export function useNotifications(location: string, autoPrompt = false) {
     });
     return () => unsubscribe?.();
   }, []);
+
+  useEffect(() => {
+    if (!enabled || !token) return;
+    void syncToken(true, prefs);
+  }, [enabled, token, location, prefs, syncToken]);
 
   return { enabled, permission, toggle, prefs, setPreference, busy, iosNeedsHomescreen: isIOS() };
 }

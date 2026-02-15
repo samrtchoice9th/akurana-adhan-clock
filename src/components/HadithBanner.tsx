@@ -9,9 +9,17 @@ interface Hadith {
   reference: string | null;
 }
 
+const STORAGE_DISMISSED_HADITH_ID = 'akurana-dismissed-hadith-id';
+
 export function HadithBanner() {
   const [hadith, setHadith] = useState<Hadith | null>(null);
-  const [dismissedHadithId, setDismissedHadithId] = useState<string | null>(null);
+  const [dismissedHadithId, setDismissedHadithId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(STORAGE_DISMISSED_HADITH_ID);
+    } catch {
+      return null;
+    }
+  });
 
   const fetchActiveHadith = useCallback(async () => {
     const { data, error } = await supabase
@@ -58,15 +66,30 @@ export function HadithBanner() {
 
     if (dismissedHadithId && dismissedHadithId !== hadith.id) {
       setDismissedHadithId(null);
+      try {
+        localStorage.removeItem(STORAGE_DISMISSED_HADITH_ID);
+      } catch {
+        // Ignore localStorage access issues.
+      }
     }
   }, [hadith, dismissedHadithId]);
+
+  const handleDismiss = useCallback(() => {
+    if (!hadith) return;
+    setDismissedHadithId(hadith.id);
+    try {
+      localStorage.setItem(STORAGE_DISMISSED_HADITH_ID, hadith.id);
+    } catch {
+      // Ignore localStorage access issues.
+    }
+  }, [hadith]);
 
   if (!hadith || dismissedHadithId === hadith.id) return null;
 
   return (
     <div className="w-full mb-4 animate-in slide-in-from-top duration-500 rounded-xl border border-primary/30 bg-primary/10 p-4 relative">
       <button
-        onClick={() => setDismissedHadithId(hadith.id)}
+        onClick={handleDismiss}
         className="absolute top-2 right-2 text-muted-foreground hover:text-foreground transition-colors"
       >
         <X className="h-4 w-4" />
